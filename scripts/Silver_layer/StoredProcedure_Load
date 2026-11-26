@@ -4,26 +4,18 @@ Stored Procedure: Load Silver Layer (Bronze -> Silver)
 ================================================================================
 
 Script Purpose:
-    This stored procedure loads cleaned and standardized data from the
-    Bronze Layer into the Silver Layer of the DataWarehouse.
+    This stored procedure performs the ETL (Extract, Transform, Load) process to
+    populate the 'silver' schema tables from the 'bronze' schema.
 
-    It performs the following operations:
-    - Truncates existing Silver tables before loading new data (Full Load).
-    - Removes unwanted spaces and standardizes customer information.
-    - Removes duplicate customer records using ROW_NUMBER().
-    - Cleans product information and handles missing values.
-    - Standardizes sales data, dates, and price calculations.
-    - Cleans and standardizes ERP customer, location, and category data.
-    - Tracks individual table loading times and total execution duration.
-    - Uses TRY...CATCH for error handling.
+Actions Performed:
+    - Truncates Silver tables before loading new data.
+    - Inserts transformed and cleansed data from Bronze into Silver tables.
+    - Tracks individual table loading time and total execution duration.
+    - Handles errors using TRY...CATCH.
 
-Tables Loaded:
-    1. silver.crm_cust_info
-    2. silver.crm_prd_info
-    3. silver.crm_sales_details
-    4. silver.erp_cust_az12
-    5. silver.erp_loc_a101
-    6. silver.erp_pax_cat_g1v2
+Parameters:
+    None.
+    This stored procedure does not accept any parameters or return any values.
 
 Usage Example:
     EXEC silver.load_silver;
