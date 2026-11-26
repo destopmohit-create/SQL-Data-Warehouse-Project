@@ -1,0 +1,254 @@
+/*
+================================================================================
+Stored Procedure: Load Silver Layer (Bronze -> Silver)
+================================================================================
+
+Script Purpose:
+    This stored procedure loads cleaned and standardized data from the
+    Bronze Layer into the Silver Layer of the DataWarehouse.
+
+    It performs the following operations:
+    - Truncates existing Silver tables before loading new data (Full Load).
+    - Removes unwanted spaces and standardizes customer information.
+    - Removes duplicate customer records using ROW_NUMBER().
+    - Cleans product information and handles missing values.
+    - Standardizes sales data, dates, and price calculations.
+    - Cleans and standardizes ERP customer, location, and category data.
+    - Tracks individual table loading times and total execution duration.
+    - Uses TRY...CATCH for error handling.
+
+Tables Loaded:
+    1. silver.crm_cust_info
+    2. silver.crm_prd_info
+    3. silver.crm_sales_details
+    4. silver.erp_cust_az12
+    5. silver.erp_loc_a101
+    6. silver.erp_pax_cat_g1v2
+
+Usage Example:
+    EXEC silver.load_silver;
+
+================================================================================
+*/
+create or alter procedure silver.load_silver as 
+begin
+	declare @start_time datetime ,@end_time datetime;
+	declare @batch_Start_time datetime, @batch_End_time datetime;
+		begin try
+		set @batch_Start_time= getdate();
+		set @start_time =getdate();
+		print'>>truncate table silver.crm_cust_info';
+		truncate table silver.crm_cust_info;
+		print'>>inserting Clean table column:cust_info into silver layer';
+		--inserting Clean table column:cust_info into silver layer
+		insert into silver.crm_cust_info
+		(
+			cst_id,
+			cst_key,
+			cst_firstname,
+			cst_lastname,
+			cst_martial_status,
+			cst_gndr,
+			cst_create_date
+		)
+		select 
+		cst_id,
+		cst_key,
+		trim(cst_firstname)as cst_firstname, --triming to removing unwanted spaces from 
+		trim(cst_lastname)as cst_lastname,--firstname and lastname 
+		case when upper(trim(cst_martial_status)) = 'S' then 'Single'--removing spaces and if 
+			 when upper(trim(cst_martial_status)) = 'M' then 'Married'--someone adds lowercase f,m changes to uppercase
+			 else 'n/a'
+		end cst_martial_status,
+
+		case when upper(trim(cst_gndr)) ='F' then 'Female'--removing spaces and if 
+			 when upper(trim(cst_gndr)) ='M' then 'Male'--someone adds lowercase f,m changes to uppercase
+			 else 'n/a'
+		end cst_gndr,
+		cst_create_date
+		from(
+
+		select
+		* ,
+		ROW_NUMBER() over(partition by cst_id order by cst_create_date desc)as flaglast
+		from bronze.crm_cust_info
+		where cst_id is not null
+		)t 
+		where flaglast =1 
+
+		set @end_time=getdate();
+		print'Load Duration of: '+ cast(datediff(second,@start_time,@end_time)as nvarchar)+'Seconds';
+		--------------------------------------------------------------------------------------------
+		set @start_time =getdate();
+		print'>>truncate table silver.crm_prd_info';
+		truncate table silver.crm_prd_info;
+		print'>>inserting Clean table column:cust_prd_info into silver layer';
+	
+		insert into silver.crm_prd_info(
+			prd_id,
+			cat_id,
+			prd_key, 
+			prd_name,
+			prd_cost, 
+			prd_line,
+			prd_start_dt,
+			prd_end_dt
+		)
+		select 
+		prd_id,--no duplicates in primary key ,clean 
+
+		replace(SUBSTRING(prd_key,1,5),'-','_') as cat_id,
+		SUBSTRING(prd_key,7,LEN(prd_key))as prd_key,
+		prd_name,
+		isnull(prd_cost,0)as prd_cost,--replacing null with 0
+		case when upper(trim(prd_line)) ='M' then 'Mountain'
+			 when upper(trim(prd_line)) ='R' then 'Road'
+			 when upper(trim(prd_line)) ='S' then 'Other Sales'
+			 when upper(trim(prd_line)) ='T' then 'Touring'
+			 else 'n/a'
+		end prd_line,
+	
+		cast(prd_start_dt as date) as prd_start_dt,--to remove time from start date (this one 00:00:000) used cast()
+		cast(lead(prd_start_dt)over(partition by prd_key order by prd_start_dt)-1 as date)as prd_end_dt
+		--resolving the date issue in these two keys by lead func and using minus 1 to reduce
+		--date by one SOOO it does not overlap, for end date
+		from bronze.crm_prd_info;
+		set @end_time=getdate();
+		print'Load Duration of: '+ cast(datediff(second,@start_time,@end_time)as nvarchar)+'Seconds';
+
+
+
+
+		----------------------------------------------------------------------------------------------------
+		set @start_time =getdate();
+		print'>>truncate table silver.crm_sales_details';
+		truncate table silver.crm_sales_details;
+		print'>>inserting Clean table column:cust_sales_details into silver layer';
+		insert into silver.crm_sales_details(
+		sls_ord_num,
+			sls_prd_key,
+			sls_cust_id,
+			sls_order_dt,
+			sls_ship_dt,
+			sls_due_dt,
+			sls_sales,
+			sls_quantity,
+			sls_price
+			)
+
+		select
+		sls_ord_num, --clean already
+			sls_prd_key,--clean already
+			sls_cust_id,--clean already
+	
+			case when sls_order_dt =0 or len(sls_order_dt)!=8  then null
+				 else cast(cast(sls_order_dt as varchar) as date) 
+			end sls_order_dt,
+				 --becauz sql server cant change directly to date first varchar
+			case when sls_ship_dt =0 or len(sls_ship_dt)!=8  then null
+				 else cast(cast(sls_ship_dt as varchar) as date) 
+			end sls_ship_dt,
+			case when sls_due_dt =0 or len(sls_due_dt)!=8  then null
+				 else cast(cast(sls_due_dt as varchar) as date) 
+			end sls_due_dt,
+
+			case when sls_sales is  null or sls_sales <=0 or sls_sales!=sls_quantity *abs(sls_price)
+					  then sls_quantity *abs(sls_price)
+					  else sls_sales
+			end as 	sls_sales,
+
+			sls_quantity,
+
+			case when sls_price is  null or sls_price <=0 
+					 then  sls_sales/nullif(sls_quantity,0)
+					 else sls_price
+			end as sls_price	
+		from bronze.crm_sales_details;
+		set @end_time=getdate();
+		print'Load Duration of: '+ cast(datediff(second,@start_time,@end_time)as nvarchar)+'Seconds';
+
+		---------------------------------------------------------------------------------------
+		set @start_time =getdate();
+		print'>>truncate table silver.erp_cust_az12';
+		truncate table silver.erp_cust_az12;
+		print'>>inserting Clean table column:silver.erp_cust_az12 into silver layer';
+
+		insert into silver.erp_cust_az12
+		(
+		cid,
+		bdate,
+		gen
+		)
+		select 
+		case when cid like 'NAS%' then substring(cid,4,len(cid))
+			  else cid
+		end as cid,
+		case when bdate > getdate() then null
+			else bdate
+		end as bdate,
+		case when upper(trim(gen))in ('F','Female') then 'Female'
+
+			 when upper(trim(gen)) in ('M','Male') then 'Male'
+			 else 'n/a'
+		end as gen
+		from bronze.erp_cust_az12;
+
+		set @end_time=getdate();
+		print'Load Duration of: '+ cast(datediff(second,@start_time,@end_time)as nvarchar)+'Seconds';
+
+		--------------------------------------------------------------------------------------
+		set @start_time =getdate();
+		print'>>truncate table silver.erp_loc_a101';
+		truncate table silver.erp_loc_a101;
+		print'>>inserting Clean table column:silver.erp_loc_a101 into silver layer';
+		insert into silver.erp_loc_a101
+		(cid,cntry)
+		select 
+		replace(cid,'-' ,'')cid, --removed the'-'so can join the table later 
+		case when trim(cntry) ='DE' then'Germany'
+			 when trim(cntry) in ('US','USA') then 'United States'
+			 when trim(cntry) = '' or trim(cntry) is null then 'n/a'
+			 else trim(cntry)
+		end as cntry 
+		from bronze.erp_loc_a101;
+
+		set @end_time=getdate();
+		print'Load Duration of: '+ cast(datediff(second,@start_time,@end_time)as nvarchar)+'Seconds';
+
+
+		-----------------------------------------------------------------------------------
+		set @start_time =getdate();
+		print'>>truncate silver.erp_pax_cat_g1v2';
+		truncate table silver.erp_pax_cat_g1v2;
+		print'>>inserting Clean table column:silver.erp_pax_cat_g1v2 into silver layer';
+		insert into silver.erp_pax_cat_g1v2
+		(  --no data cleaning as the data is clean already but we have to check
+		-- for every column
+		id,
+		cat,
+		subcat,
+		maintaince
+		)
+		select 
+		id,
+		cat,
+		subcat,
+		maintaince
+		from bronze.erp_pax_cat_g1v2;
+	
+		set @end_time=getdate();
+		print'Load Duration of: '+ cast(datediff(second,@start_time,@end_time)as nvarchar)+'Seconds';
+
+
+		set @batch_End_time =getdate();
+		print'Total Loading Duration'+cast(datediff(second,@batch_Start_time,@batch_End_time )as nvarchar)+'seconds';
+		end try
+		begin catch
+
+		print'Error Message'+Error_message();
+		print'Error Number'+cast(Error_number()as nvarchar);
+		print'Error State'+cast(Error_state()as nvarchar);
+		end catch
+
+end
+
